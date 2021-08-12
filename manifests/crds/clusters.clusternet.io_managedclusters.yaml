@@ -86,6 +86,9 @@ spec:
               appPusher:
                 description: AppPusher indicates whether to allow parent cluster deploying applications in Push or Dual Mode. Mainly for security concerns.
                 type: boolean
+              clusterCIDR:
+                description: ClusterCIDR is the CIDR range of the cluster
+                type: string
               healthz:
                 description: Healthz indicates the healthz status of the cluster which is deprecated since Kubernetes v1.16. Please use Livez and Readyz instead. Leave it here only for compatibility.
                 type: boolean
@@ -99,6 +102,10 @@ spec:
               livez:
                 description: Livez indicates the livez status of the cluster
                 type: boolean
+              nodeCount:
+                description: NodeCount is the number of nodes in the cluster
+                format: int32
+                type: integer
               parentAPIServerURL:
                 description: ParentAPIServerURL is the advertising url/address of managed Kubernetes cluster registering to
                 type: string
@@ -108,6 +115,9 @@ spec:
               readyz:
                 description: Readyz indicates the readyz status of the cluster
                 type: boolean
+              serviceCIDR:
+                description: ServcieCIDR is the CIDR range of the services
+                type: string
               useSocket:
                 description: UseSocket indicates whether to use socket proxy when connecting to child cluster.
                 type: boolean

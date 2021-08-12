@@ -233,6 +233,18 @@ type ManagedClusterStatus struct {
 	//
 	// +optional
 	ParentAPIServerURL string `json:"parentAPIServerURL,omitempty"`
+
+	// ClusterCIDR is the CIDR range of the cluster
+	// +optional
+	ClusterCIDR string `json:"clusterCIDR,omitempty"`
+
+	// ServcieCIDR is the CIDR range of the services
+	// +optional
+	ServiceCIDR string `json:"serviceCIDR,omitempty"`
+
+	// NodeCount is the number of nodes in the cluster
+	// +optional
+	NodeCount int32 `json:"nodeCount,omitempty"`
 }
 
 // +genclient
