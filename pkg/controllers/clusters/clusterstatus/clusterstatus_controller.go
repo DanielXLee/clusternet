@@ -21,15 +21,22 @@ import (
 	"net/http"
 	"sync"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/version"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	corev1Lister "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
 	clusterapi "github.com/clusternet/clusternet/pkg/apis/clusters/v1beta1"
 	"github.com/clusternet/clusternet/pkg/features"
+	"github.com/clusternet/clusternet/pkg/hub"
 )
 
 // Controller is a controller that collects cluster status
@@ -42,9 +49,16 @@ type Controller struct {
 	appPusherEnabled bool
 	useSocket        bool
 	parentAPIServer  string
+	nodeLister       corev1Lister.NodeLister
+	podLister        corev1Lister.PodLister
+	nodeListerSynced cache.InformerSynced
+	podListerSynced  cache.InformerSynced
 }
 
-func NewController(apiserverURL, parentAPIServerURL string, kubeClient kubernetes.Interface, collectingPeriod metav1.Duration) *Controller {
+func NewController(ctx context.Context, apiserverURL, parentAPIServerURL string, kubeClient kubernetes.Interface, collectingPeriod metav1.Duration) *Controller {
+	k8sFactory := informers.NewSharedInformerFactory(kubeClient, hub.DefaultResync)
+	k8sFactory.Start(ctx.Done())
+
 	return &Controller{
 		kubeClient:       kubeClient,
 		lock:             &sync.Mutex{},
@@ -53,10 +67,20 @@ func NewController(apiserverURL, parentAPIServerURL string, kubeClient kubernete
 		appPusherEnabled: utilfeature.DefaultFeatureGate.Enabled(features.AppPusher),
 		useSocket:        utilfeature.DefaultFeatureGate.Enabled(features.SocketConnection),
 		parentAPIServer:  parentAPIServerURL,
+		nodeLister:       k8sFactory.Core().V1().Nodes().Lister(),
+		nodeListerSynced: k8sFactory.Core().V1().Nodes().Informer().HasSynced,
+		podLister:        k8sFactory.Core().V1().Pods().Lister(),
+		podListerSynced:  k8sFactory.Core().V1().Pods().Informer().HasSynced,
 	}
+
 }
 
 func (c *Controller) Run(ctx context.Context) {
+	if !cache.WaitForNamedCacheSync("cluster-status-controller", ctx.Done(),
+		c.podListerSynced, c.nodeListerSynced) {
+		return
+	}
+
 	wait.UntilWithContext(ctx, c.collectingClusterStatus, c.collectingPeriod.Duration)
 }
 
@@ -68,11 +92,19 @@ func (c *Controller) collectingClusterStatus(ctx context.Context) {
 		return
 	}
 
-	clusterNodeCount, err := c.getClusterNodeCount(ctx)
+	nodes, err := c.nodeLister.List(labels.Everything())
+	if err != nil {
+		klog.Warningf("failed to list nodes: %v", err)
+		return
+	}
+
+	nodeStatistics, err := getNodeStatistics(nodes)
 	if err != nil {
 		klog.Warningf("failed to collect cluster node count: %v", err)
 		return
 	}
+
+	capacity, allocatable := getNodeResource(nodes)
 
 	clusterCIDR, err := c.discoverClusterCIDR()
 	if err != nil {
@@ -98,7 +130,9 @@ func (c *Controller) collectingClusterStatus(ctx context.Context) {
 	status.ParentAPIServerURL = c.parentAPIServer
 	status.ClusterCIDR = clusterCIDR
 	status.ServiceCIDR = serviceCIDR
-	status.NodeCount = clusterNodeCount
+	status.NodeStatistics = nodeStatistics
+	status.Allocatable = allocatable
+	status.Capacity = capacity
 	c.setClusterStatus(status)
 }
 
@@ -136,21 +170,68 @@ func (c *Controller) getHealthStatus(ctx context.Context, path string) bool {
 	return statusCode == http.StatusOK
 }
 
-// getClusterNodeCount returns the number of nodes in the cluster
-func (c *Controller) getClusterNodeCount(ctx context.Context) (int32, error) {
-	nodes, err := c.kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return 0, err
+// getNodeStatistics returns the NodeStatistics in the cluster
+// get nodes num in different conditions
+func getNodeStatistics(nodes []*corev1.Node) (nodeStatistics clusterapi.NodeStatistics, err error) {
+	for _, node := range nodes {
+		flag, condition := getNodeCondition(&node.Status, corev1.NodeReady)
+		if flag == -1 {
+			nodeStatistics.LostNodes += 1
+			continue
+		}
+
+		switch condition.Status {
+		case corev1.ConditionTrue:
+			nodeStatistics.ReadyNodes += 1
+		case corev1.ConditionFalse:
+			nodeStatistics.NotReadyNodes += 1
+		case corev1.ConditionUnknown:
+			nodeStatistics.UnknownNodes += 1
+		}
 	}
-	return int32(len(nodes.Items)), nil
+	return
 }
 
 // discoverServiceCIDR returns the service CIDR for the cluster.
-func (c *Controller)discoverServiceCIDR() (string, error) {
+func (c *Controller) discoverServiceCIDR() (string, error) {
 	return findPodIPRange(c.nodeLister, c.podLister)
 }
 
 // discoverClusterCIDR returns the cluster CIDR for the cluster.
-func (c *Controller)discoverClusterCIDR() (string, error) {
+func (c *Controller) discoverClusterCIDR() (string, error) {
 	return findClusterIPRange(c.podLister)
+}
+
+// get node capacity and allocatable resource
+func getNodeResource(nodes []*corev1.Node) (Capacity, Allocatable corev1.ResourceList) {
+	var capacityCpu, capacityMem, allocatableCpu, allocatableMem resource.Quantity
+	Capacity, Allocatable = make(map[corev1.ResourceName]resource.Quantity), make(map[corev1.ResourceName]resource.Quantity)
+
+	for _, node := range nodes {
+		capacityCpu.Add(*node.Status.Capacity.Cpu())
+		capacityMem.Add(*node.Status.Capacity.Memory())
+		allocatableCpu.Add(*node.Status.Allocatable.Cpu())
+		allocatableMem.Add(*node.Status.Allocatable.Memory())
+	}
+
+	Capacity[corev1.ResourceCPU] = capacityCpu
+	Capacity[corev1.ResourceMemory] = capacityMem
+	Allocatable[corev1.ResourceCPU] = allocatableCpu
+	Allocatable[corev1.ResourceMemory] = allocatableMem
+
+	return
+}
+
+// getNodeCondition returns the specified condition from node's status
+// Copied from k8s.io/kubernetes/pkg/controller/util/node/controller_utils.go and make some modifications
+func getNodeCondition(status *corev1.NodeStatus, conditionType corev1.NodeConditionType) (int, *corev1.NodeCondition) {
+	if status == nil {
+		return -1, nil
+	}
+	for i := range status.Conditions {
+		if status.Conditions[i].Type == conditionType {
+			return i, &status.Conditions[i]
+		}
+	}
+	return -1, nil
 }
