@@ -82,7 +82,7 @@ type HelmOptions struct {
 	// +required
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Type=string
-	// +kubebuilder:validation:Pattern=`^(?:http(s)?:\/\/)?[\w.-]+(?:\.[\w\.-]+)+[\w\-\._~:/?#[\]@!\$&\(\)\*\+,;=.]+$`
+	// +kubebuilder:validation:Pattern=`^(?:((http(s)?)|(oci)?):\/\/)?[\w.-]+(?:\.[\w\.-]+)+[\w\-\._~:/?#[\]@!\$&\(\)\*\+,;=.]+$`
 	Repository string `json:"repo"`
 
 	// ChartPullSecret is the name of the secret that contains the auth information for the chart repository.

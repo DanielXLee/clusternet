@@ -63,7 +63,14 @@ func LocateAuthHelmChart(chartRepo, username, password, chartName, chartVersion 
 	client.ChartPathOptions.Username = username
 	client.ChartPathOptions.Password = password
 
-	cp, err := client.ChartPathOptions.LocateChart(chartName, Settings)
+	fullChartName := chartName
+	if strings.HasPrefix(chartRepo, "oci://") {
+		fullChartName = fmt.Sprintf("%s/%s", chartRepo, chartName)
+		klog.V(5).Infof("oci chart repo, full chart name is %s\n", fullChartName)
+		client.ChartPathOptions.RepoURL = ""
+	}
+
+	cp, err := client.ChartPathOptions.LocateChart(fullChartName, Settings)
 	if err != nil {
 		return nil, err
 	}

@@ -789,15 +789,31 @@ func (deployer *Deployer) handleHelmChart(chart *appsapi.HelmChart) error {
 			return err
 		}
 	}
-	_, err = repo.FindChartInAuthRepoURL(chart.Spec.Repository, username, password, chart.Spec.Chart, chart.Spec.ChartVersion,
-		"", "", "",
-		getter.All(utils.Settings))
-	if err != nil {
-		// failed to find chart
-		return deployer.chartController.UpdateChartStatus(chart, &appsapi.HelmChartStatus{
-			Phase:  appsapi.HelmChartNotFound,
-			Reason: err.Error(),
+	if strings.HasPrefix(chart.Spec.Repository, "oci://") {
+		klog.V(5).Info("oci protocal,skip FindChartInAuthRepoURL ")
+		err = deployer.chartController.UpdateChartStatus(chart, &appsapi.HelmChartStatus{
+			Phase: appsapi.HelmChartFound,
 		})
+		if err != nil {
+			return err
+		}
+	} else {
+		_, err = repo.FindChartInAuthRepoURL(chart.Spec.Repository, username, password, chart.Spec.Chart, chart.Spec.ChartVersion,
+			"", "", "",
+			getter.All(utils.Settings))
+		if err != nil {
+			// failed to find chart
+			return deployer.chartController.UpdateChartStatus(chart, &appsapi.HelmChartStatus{
+				Phase:  appsapi.HelmChartNotFound,
+				Reason: err.Error(),
+			})
+		}
+		err = deployer.chartController.UpdateChartStatus(chart, &appsapi.HelmChartStatus{
+			Phase: appsapi.HelmChartFound,
+		})
+		if err != nil {
+			return err
+		}
 	}
 	err = deployer.chartController.UpdateChartStatus(chart, &appsapi.HelmChartStatus{
 		Phase: appsapi.HelmChartFound,
